@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>ChatGPTログビューワ</title>
+  <style>
+    body {
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      height: 100vh;
+      background-color: #202123;
+      color: white;
+    }
+
+    #left-column {
+      width: 300px;
+      background-color: #343541;
+      overflow-y: auto;
+      padding: 10px;
+    }
+
+    #right-column {
+      flex: 1;
+      padding: 20px;
+      overflow-y: auto;
+      background-color: #40414f;
+    }
+
+    .date-group {
+      margin-bottom: 15px;
+    }
+
+    .date-header {
+      font-size: 16px;
+      font-weight: bold;
+      margin-bottom: 5px;
+      color: #bbb;
+      border-bottom: 1px solid #555;
+    }
+
+    .chat-item {
+      padding: 6px 8px;
+      cursor: pointer;
+      border-radius: 4px;
+      transition: background-color 0.3s;
+    }
+
+    .chat-item:hover {
+      background-color: #565869;
+    }
+
+    .chat-message {
+      margin-bottom: 15px;
+      padding: 10px;
+      border-radius: 6px;
+    }
+
+    .user-message {
+      background-color: #2d7df6;
+      color: white;
+      text-align: left;
+    }
+
+    .assistant-message {
+      background-color: #565869;
+      color: white;
+      text-align: left;
+    }
+
+    /* 分析テーブル用CSS */
+    .analysis-table {
+      width: 100%;
+      border-collapse: collapse;
+      color: #ddd;
+      font-size: 14px;
+      text-align: center;
+      margin-bottom: 20px;
+    }
+
+    .analysis-table th, .analysis-table td {
+      border: 1px solid #666;
+      padding: 8px 10px;
+    }
+
+    .analysis-table th {
+      background-color: #4a4b5e;
+      font-weight: bold;
+    }
+
+    .analysis-table tr:nth-child(even) {
+      background-color: #40414f;
+    }
+
+    .analysis-table tr:nth-child(odd) {
+      background-color: #343541;
+    }
+
+    .analysis-table tr:hover {
+      background-color: #565869;
+    }
+
+    .graph-container {
+      display: flex;
+      width: 100%;
+      overflow-y: auto; /* コンテナにスクロールバーを設定 */
+      height: 400px; /* 高さを任意に調整してください */
+      color: white;
+    }
+
+    .graph-column {
+      flex: 1; /* 幅を半々に */
+      overflow: hidden; /* 内部スクロールを無効化 */
+      padding: 0 10px;
+    }
+
+    .graph-item {
+      display: flex;
+      align-items: center;
+      height: 25px; /* 行の高さを統一 */
+    }
+
+  </style>
+</head>
+
+<body>
+  <div id="left-column"></div>
+  <div id="right-column">会話を選択してください。</div>
+
+  <script>
+    async function loadJSON(file) {
+      const response = await fetch(file);
+      return await response.json();
+    }
+
+    function formatDate(timestamp) {
+      const date = new Date(timestamp * 1000);
+      return date.getFullYear() + "/" + (date.getMonth() + 1) + "/" + date.getDate();
+    }
+
+    function createChatList(conversations) {
+      const container = document.getElementById('left-column');
+
+      // 分析ショートカット
+      const analysisDiv = document.createElement('div');
+      analysisDiv.className = 'chat-item';
+      analysisDiv.textContent = '📊 分析';
+      analysisDiv.onclick = showAnalysis;
+      container.appendChild(analysisDiv);
+
+      // 日付ごとにまとめる
+      const groups = {};
+      conversations.forEach(convo => {
+        const date = formatDate(convo.create_time);
+        if (!groups[date]) groups[date] = [];
+        groups[date].push(convo);
+      });
+
+      // 日付を新しい順に並べる
+      const sortedDates = Object.keys(groups).sort((a, b) => new Date(b) - new Date(a));
+
+      sortedDates.forEach(date => {
+        const dateGroup = groups[date];
+        let dailyTokensSum = 0, dailyTurnsSum = 0;
+
+        const groupDiv = document.createElement('div');
+        groupDiv.className = 'date-group';
+
+        const dateHeader = document.createElement('div');
+        dateHeader.className = 'date-header';
+        dateHeader.textContent = date;
+        groupDiv.appendChild(dateHeader);
+
+        groups[date].forEach((convo, index) => {
+          let currentNode = convo.current_node;
+          let messages = [];
+          while (currentNode) {
+            const node = convo.mapping[currentNode];
+            if (
+              node.message &&
+              node.message.content &&
+              node.message.content.parts &&
+              node.message.content.parts.length > 0
+            ) {
+              messages.push({
+                role: node.message.author.role === "user" ? "USER" : "ChatGPT",
+                text: node.message.content.parts.join("\n")
+              });
+            }
+            currentNode = node.parent;
+          }
+          messages.reverse();
+
+          // トークン集計（S最大値）
+          const analysis = [];
+          let S = 0;
+          messages.forEach((msg, idx) => {
+            const tokens = msg.text.length;
+            if (idx % 2 === 0) {
+              analysis.push({X: tokens, Y: 0, T: tokens, S: (S += tokens)});
+            } else {
+              analysis[analysis.length - 1].Y = tokens;
+              analysis[analysis.length - 1].T += tokens;
+              analysis[analysis.length - 1].S = (S += tokens);
+            }
+          });
+
+          const maxS = Math.max(...analysis.map(a => a.S));
+          dailyTokensSum += maxS;
+          dailyTurnsSum += analysis.length;
+
+          // 左カラムの各タイトル表示
+          const itemDiv = document.createElement('div');
+          itemDiv.className = 'chat-item';
+          itemDiv.innerHTML = `${convo.title}<br>【${formatNumber(maxS)} tk/${analysis.length} T】`;
+          itemDiv.onclick = () => displayConversation(convo);
+          groupDiv.appendChild(itemDiv);
+        });
+
+        // 日付ごとの合計を表示
+        dateHeader.textContent = `${date}【${formatNumber(dailyTokensSum)} tk/${dailyTurnsSum} T】`;
+        groupDiv.prepend(dateHeader);
+
+        container.appendChild(groupDiv);
+      });
+    }
+
+    function formatNumber(num) {
+      if (num >= 1e9) return (num / 1e9).toFixed(2) + ' G';
+      if (num >= 1e6) return (num / 1e6).toFixed(2) + ' M';
+      if (num >= 1e3) return (num / 1e3).toFixed(1) + ' k';
+      return num.toString();
+    }
+
+    function displayConversation(conversation) {
+      const container = document.getElementById('right-column');
+      container.innerHTML = '';
+
+      let currentNode = conversation.current_node;
+      let messages = [];
+
+      while (currentNode != null) {
+        const node = conversation.mapping[currentNode];
+        if (
+          node.message &&
+          node.message.content &&
+          node.message.content.parts &&
+          node.message.content.parts.length > 0 &&
+          (node.message.author.role !== "system" || node.message.metadata?.is_user_system_message)
+        ) {
+          let author = node.message.author.role;
+          if (author === "assistant" || author === "tool") {
+            author = "ChatGPT";
+          } else if (author === "user") {
+            author = "USER";
+          }
+
+          if (node.message.content.content_type === "text" || node.message.content.content_type === "multimodal_text") {
+            const parts = node.message.content.parts.filter(part => typeof part === "string" && part.length > 0);
+            if (parts.length > 0) {
+              messages.push({ author, text: parts.join("\n") });
+            }
+          }
+        }
+        currentNode = node.parent;
+      }
+
+      messages.reverse(); // 時系列順にする
+
+      // --- トークン分析処理の修正版 ---
+      let analysis = [];
+      let cumulativeS = 0; // ログ合計（S）
+      let cumulativeR = 0; // API課金再帰累積（R）
+      let cumulativeSKV = 0; // 累積KV (SKV)
+      const maxKV = 128000; // 128kリミット設定
+      const max_context=128000;
+
+
+      for (let i = 0; i < messages.length; i += 2) {
+        const X = messages[i]?.text.length || 0;      // USERトークン
+        const Y = messages[i + 1]?.text.length || 0;  // ChatGPTトークン
+        const T = X + Y;                              // 入出力合計 (T)
+        
+        // 前ターンまでのログ合計(S)を128kで制限（実際のAPI挙動）
+        const limitedPrevS = Math.min(cumulativeS, maxKV);
+
+        // 新規KV計算 (KV)
+//        const newKV = (limitedPrevS + X) * X;
+        const newKV = (limitedPrevS + X + Y) * (X + Y);
+
+        cumulativeS += T;                             // ログ合計 (S)
+        cumulativeSKV += newKV;
+
+        // API課金再帰累積トークン(R)
+        cumulativeR += Math.min(cumulativeS, max_context);
+
+        analysis.push({
+          turn: (i / 2) + 1,
+          X, Y, T,
+          S: cumulativeS,
+          KV: newKV,
+          SKV: cumulativeSKV,
+          R: cumulativeR
+        });
+      }
+
+// 分析テーブルHTMLを生成 (CSSクラス名は適宜調整)
+let tableHtml = `
+<table style="width:100%;border-collapse:collapse;color:white;margin-bottom:15px;"">
+  <tr>
+    <th>ターン</th>
+    <th>USER (X)</th>
+    <th>ChatGPT (Y)</th>
+    <th>入出力 (T)</th>
+    <th>ログ合計 (S)</th>
+    <th>新規KV (KV)</th>
+    <th>累積KV (SKV)</th>
+    <th>API課金再帰累積 (R)</th>
+  </tr>`;      
+      analysis.forEach(row => {
+        tableHtml += `<tr style="border-bottom:1px solid #666;text-align:center;">
+          <td>${row.turn}</td>
+          <td>${row.X}</td>
+          <td>${row.Y}</td>
+          <td>${row.T}</td>
+          <td>${formatNumber(row.S)}</td>
+          <td>${formatNumber(row.KV)}</td>
+          <td>${formatNumber(row.SKV)}</td>
+          <td>${formatNumber(row.R)}</td>
+        </tr>`;
+      });
+      tableHtml += '</table>';
+
+      container.innerHTML += tableHtml; // テーブル表示
+
+      // --- トークン分析処理ここまで ---
+
+      messages.forEach(msg => {
+        const messageDiv = document.createElement('div');
+        messageDiv.className = 'chat-message';
+
+        if (msg.author === 'USER') {
+          messageDiv.classList.add('user-message');
+        } else {
+          messageDiv.classList.add('assistant-message');
+        }
+
+        const formattedText = msg.text
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/\n/g, "<br>")
+          .replace(/&lt;br&gt;/g, "<br>");
+
+        messageDiv.innerHTML = formattedText;
+        container.appendChild(messageDiv);
+      });
+    }
+
+    // 分析画面表示関数（仮実装）
+    function showAnalysis() {
+      const container = document.getElementById('right-column');
+      container.innerHTML = '<h2>分析データ（月次・日次）</h2>';
+
+      // 月ごとの累計（実際のログから集計）
+      const monthlyData = {};
+
+      const maxKV = 128000; // KV計算時の128kトークン上限設定
+      const max_context=128000;
+      jsonData.forEach(convo => {
+        const dateObj = new Date(convo.create_time * 1000);
+        const month = `${dateObj.getFullYear()}/${dateObj.getMonth() + 1}`;
+        if (!monthlyData[month]) monthlyData[month] = { T:0, S:0, R:0, SKV:0 };
+
+        let currentNode = convo.current_node, messages = [];
+        while (currentNode) {
+          const node = convo.mapping[currentNode];
+          if (node.message && node.message.content && node.message.content.parts && node.message.content.parts.length > 0) {
+            messages.push(node.message.content.parts.join("\n"));
+          }
+          currentNode = node.parent;
+        }
+        messages.reverse();
+
+        let cumulativeS = 0;  // ログ合計(S)
+        let cumulativeR = 0;  // 再帰累積トークン(R)
+        let cumulativeSKV = 0; // 累積KV(SKV)
+
+        for (let i = 0; i < messages.length; i += 2) {
+          const X = messages[i]?.length || 0;   // USER入力トークン
+          const Y = messages[i + 1]?.length || 0; // ChatGPT出力トークン
+          const T = X + Y;
+
+          const limitedPrevS = Math.min(cumulativeS, maxKV); // 128k打ち切り
+
+//          const newKV = (limitedPrevS + X) * X; // 新規KV計算
+          const newKV = (limitedPrevS + X + Y) * (X + Y);
+
+          cumulativeS += T;                   // Sを更新
+          cumulativeR += Math.min(cumulativeS, max_context); // API課金用の累積再帰トークン更新
+
+          cumulativeSKV += newKV;             // SKVを更新
+        }
+
+        monthlyData[month].T += messages.length / 2; // ターン数
+        monthlyData[month].S += cumulativeS;         // 累積ログ合計S
+        monthlyData[month].R += cumulativeR;         // 累積再帰トークンR
+        monthlyData[month].SKV += cumulativeSKV;     // 累積KV計算SKV
+      });
+
+
+      // 月次データ表示テーブル
+let tableHtml = `
+<table class="analysis-table">
+  <tr>
+    <th>月</th>
+    <th>ターン数 (T)</th>
+    <th>ログ合計 (S)</th>
+    <th>累積SKV (KV)</th>
+    <th>API課金再帰累積  (R)</th>
+  </tr>`;
+
+      // 月を降順（新しい月が上）で並べ替え
+      Object.entries(monthlyData)
+        .sort((a, b) => new Date(b[0] + '/01') - new Date(a[0] + '/01'))
+        .forEach(([month, data]) => {
+          tableHtml += `
+          <tr>
+            <td>${month}</td>
+            <td>${formatNumber(data.T)}</td>
+            <td>${formatNumber(data.S)}</td>
+            <td>${formatNumber(data.SKV)}</td>
+            <td>${formatNumber(data.R)}</td>
+          </tr>`;
+      });
+
+      tableHtml += '</table>';
+      container.innerHTML += tableHtml;
+
+
+      // 日次グラフのタイトルとコンテナを作成
+      container.innerHTML += '<h3>日次グラフAPI再帰(R)</h3>';
+
+
+      const dailyData = {};
+      jsonData.forEach(convo => {
+        const date = formatDate(convo.create_time);
+        if (!dailyData[date]) dailyData[date] = {T:0, S:0, R:0};
+
+        let currentNode = convo.current_node, messages = [];
+        while (currentNode) {
+          const node = convo.mapping[currentNode];
+          if (
+            node.message &&
+            node.message.content &&
+            node.message.content.parts &&
+            node.message.content.parts.length > 0 // ← 明確に追加した条件
+          ) {
+            messages.push(node.message.content.parts.join("\n"));
+          }
+          currentNode = node.parent;
+        }
+        let S=0, R=0;
+        messages.forEach((text, idx)=>{
+          S += text.length;
+          R += S;
+        });
+
+        dailyData[date].T += messages.length / 2;
+        dailyData[date].S += S;
+        dailyData[date].R += R;
+      });
+
+      // グラフコンテナを作成（動的にJSでのみ作成）
+      const graphContainer = document.createElement('div');
+      graphContainer.style.display = 'flex';
+      graphContainer.style.flexDirection = 'column';
+      graphContainer.style.width = '100%';
+      graphContainer.style.height = '400px'; // ここを統一（400px推奨）
+      graphContainer.style.overflowY = 'auto';
+      graphContainer.style.color = 'white';
+      graphContainer.style.border = '1px solid #666';
+
+      // グラフの最大値（R）の取得
+      const maxValueR = Math.max(...Object.values(dailyData).map(data => data.R));
+
+      // グラフ描画用divを作成
+      Object.entries(dailyData)
+      .sort((a, b) => new Date(b[0]) - new Date(a[0]))
+      .forEach(([date, data]) => {
+        const valueR = data.R;
+        const barPercent = (valueR / maxValueR) * 100; // 最大値を100%としてスケーリング
+
+        const graphItem = document.createElement('div');
+        graphItem.style.display = 'flex';
+        graphItem.style.alignItems = 'center';
+        graphItem.style.height = '25px';
+        graphItem.style.marginBottom = '2px';
+
+        // バー表示領域（右揃え）
+        const barContainer = document.createElement('div');
+        barContainer.style.flex = '1';
+        barContainer.style.display = 'flex';
+        barContainer.style.justifyContent = 'flex-end';
+
+        const barDiv = document.createElement('div');
+        barDiv.style.width = `${barPercent}%`;
+        barDiv.style.maxWidth = '100%';
+        barDiv.style.background = 'linear-gradient(to right, #f9cce3, #f48fb1)';
+        barDiv.style.border = '1px solid #ffd6e8';
+        barDiv.style.height = '15px';
+
+        // 日付など表示領域（左揃え・固定幅）
+        const dateDiv = document.createElement('div');
+        dateDiv.style.flex = '0 0 300px';
+        dateDiv.style.textAlign = 'left';
+        dateDiv.textContent = `${date} (${data.T}T) ${formatNumber(valueR)} tk(R)`;
+
+
+        barContainer.appendChild(barDiv);
+        graphItem.appendChild(barContainer);
+        graphItem.appendChild(dateDiv);
+        graphContainer.appendChild(graphItem);
+      });
+
+      // メインコンテナにグラフコンテナを追加（ここで一回だけ追加）
+      container.appendChild(graphContainer);
+
+    }
+
+    // グローバルスコープでjsonDataを定義
+    let jsonData = [];
+    
+    // ログデータの読み込み
+    async function loadJSON(file) {
+      try {
+        const response = await fetch(file);
+        if (!response.ok) {
+          console.error("ファイルの読み込みエラー:", response.status, response.statusText);
+          return;
+        }
+        jsonData = await response.json();
+        console.log("読み込み成功！", jsonData); // 読み込んだJSONをコンソールに表示
+        return jsonData;
+      } catch (e) {
+        console.error("JSON読み込み中にエラー発生:", e);
+      }
+    }
+
+    // ここで実際にJSONをロードして、createChatListに渡します。
+    loadJSON('conversations.json').then(data => {
+      if (data) {
+        createChatList(data);
+      } else {
+        console.error("データが取得できませんでした。");
+      }
+    });
+    </script>
+  </body>
+</html>
